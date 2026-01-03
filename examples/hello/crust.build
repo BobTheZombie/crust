@@ -1,0 +1,14 @@
+[project]
+name = "hello"
+version = "0.1.0"
+
+[[targets]]
+type = "executable"
+name = "hello"
+sources = ["src/main.c"]
+deps = ["util"]
+
+[[targets]]
+type = "static_library"
+name = "util"
+sources = ["src/util.c"]

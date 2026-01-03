@@ -1,0 +1,13 @@
+[project]
+name = "library-demo"
+
+[[targets]]
+type = "shared_library"
+name = "math"
+sources = ["src/math.c"]
+
+[[targets]]
+type = "executable"
+name = "calc"
+sources = ["src/main.c"]
+deps = ["math"]

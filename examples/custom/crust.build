@@ -1,0 +1,15 @@
+[project]
+name = "custom"
+
+[[targets]]
+type = "custom_command"
+name = "codegen"
+command = "echo 'generated' > src/generated.txt"
+outputs = ["src/generated.txt"]
+inputs = ["schema.txt"]
+
+[[targets]]
+type = "executable"
+name = "consumer"
+sources = ["src/main.c"]
+deps = ["codegen"]
