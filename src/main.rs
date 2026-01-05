@@ -1,5 +1,6 @@
 mod backend;
 mod config;
+mod executor;
 mod graph;
 
 use anyhow::{Context, Result};
@@ -46,6 +47,10 @@ struct CommandOptions {
     #[arg(short = 'b', long, default_value = "build")]
     builddir: PathBuf,
 
+    /// Maximum number of concurrent jobs (defaults to CPU count)
+    #[arg(short = 'j', long)]
+    jobs: Option<usize>,
+
     /// Backend used to generate build files
     #[arg(long, value_enum, default_value_t = BackendChoice::Native)]
     backend: BackendChoice,
@@ -73,7 +78,10 @@ fn drive(opts: &CommandOptions, show_hint: bool) -> Result<()> {
     let manifest = ProjectManifest::load(&opts.manifest)?;
     let graph = DependencyGraph::from_manifest(&manifest)?;
     let manifest_dir = ProjectManifest::manifest_dir(&opts.manifest);
-    let backend = backend_from_choice(opts.backend, &manifest_dir);
+    if let Some(0) = opts.jobs {
+        return Err(anyhow::anyhow!("--jobs must be at least 1"));
+    }
+    let backend = backend_from_choice(opts.backend, &manifest_dir, opts.jobs);
     let outputs_to_check = backend.primary_outputs(&graph, &opts.builddir);
     let outdated =
         outputs_to_check.is_empty() || graph.is_outdated(&opts.manifest, &outputs_to_check)?;
@@ -135,9 +143,13 @@ fn clean(builddir: &PathBuf) -> Result<()> {
     Ok(())
 }
 
-fn backend_from_choice(choice: BackendChoice, manifest_dir: &Path) -> Box<dyn Backend> {
+fn backend_from_choice(
+    choice: BackendChoice,
+    manifest_dir: &Path,
+    jobs: Option<usize>,
+) -> Box<dyn Backend> {
     match choice {
-        BackendChoice::Native => Box::new(CrustBackend::new(manifest_dir.to_path_buf())),
+        BackendChoice::Native => Box::new(CrustBackend::new(manifest_dir.to_path_buf(), jobs)),
         BackendChoice::Ninja => Box::new(NinjaBackend),
         BackendChoice::Make => Box::new(MakeBackend),
     }
