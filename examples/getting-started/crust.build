@@ -1,0 +1,8 @@
+[project]
+name = "getting-started"
+version = "0.1.0"
+
+[[targets]]
+type = "executable"
+name = "hello_crust"
+sources = ["src/main.c"]
