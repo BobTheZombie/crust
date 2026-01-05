@@ -3,11 +3,11 @@ mod config;
 mod graph;
 
 use anyhow::{Context, Result};
-use backend::{make::MakeBackend, ninja::NinjaBackend, Backend};
+use backend::{make::MakeBackend, native::CrustBackend, ninja::NinjaBackend, Backend};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use config::ProjectManifest;
 use graph::DependencyGraph;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Parser)]
 #[command(
@@ -47,12 +47,13 @@ struct CommandOptions {
     builddir: PathBuf,
 
     /// Backend used to generate build files
-    #[arg(long, value_enum, default_value = "ninja")]
+    #[arg(long, value_enum, default_value_t = BackendChoice::Native)]
     backend: BackendChoice,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum, Debug)]
 enum BackendChoice {
+    Native,
     Ninja,
     Make,
 }
@@ -61,49 +62,65 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Configure(opts) => configure(&opts),
-        Commands::Build(opts) => build(&opts),
-        Commands::Test(opts) => build(&opts),
+        Commands::Configure(opts) => drive(&opts, false),
+        Commands::Build(opts) => drive(&opts, true),
+        Commands::Test(opts) => drive(&opts, true),
         Commands::Clean { builddir } => clean(&builddir),
     }
 }
 
-fn configure(opts: &CommandOptions) -> Result<()> {
+fn drive(opts: &CommandOptions, show_hint: bool) -> Result<()> {
     let manifest = ProjectManifest::load(&opts.manifest)?;
     let graph = DependencyGraph::from_manifest(&manifest)?;
-    let backend = backend_from_choice(opts.backend);
-    let expected_output = expected_backend_output(&*backend, &opts.builddir);
+    let manifest_dir = ProjectManifest::manifest_dir(&opts.manifest);
+    let backend = backend_from_choice(opts.backend, &manifest_dir);
+    let outputs_to_check = backend.primary_outputs(&graph, &opts.builddir);
+    let outdated =
+        outputs_to_check.is_empty() || graph.is_outdated(&opts.manifest, &outputs_to_check)?;
 
-    if !graph.is_outdated(&opts.manifest, &[expected_output.clone()])? {
+    if !outdated {
         println!(
             "{} backend already up-to-date at {}",
             backend.name(),
-            expected_output.display()
+            opts.builddir.display()
         );
-        return Ok(());
+    } else {
+        let result = backend.emit(&graph, &opts.builddir, &manifest_dir)?;
+        if backend.name() == "native" {
+            println!(
+                "Built {} output(s) in {}",
+                result.files.len(),
+                opts.builddir.display()
+            );
+        } else {
+            println!(
+                "Generated {} backend files: {}",
+                backend.name(),
+                result
+                    .files
+                    .iter()
+                    .map(|p| p.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
     }
 
-    let result = backend.emit(&graph, &opts.builddir)?;
-    println!(
-        "Generated {} backend files: {}",
-        backend.name(),
-        result
-            .files
-            .iter()
-            .map(|p| p.display().to_string())
-            .collect::<Vec<_>>()
-            .join(", ")
-    );
-    Ok(())
-}
+    if show_hint {
+        if backend.name() == "native" {
+            println!(
+                "Native build complete. Outputs live in {}",
+                opts.builddir.display()
+            );
+        } else {
+            println!(
+                "Backend ready. Invoke '{}' in {} to build.",
+                opts.backend.command_hint(),
+                opts.builddir.display()
+            );
+        }
+    }
 
-fn build(opts: &CommandOptions) -> Result<()> {
-    configure(opts)?;
-    println!(
-        "Backend ready. Invoke '{}' in {} to build.",
-        opts.backend.command_hint(),
-        opts.builddir.display()
-    );
     Ok(())
 }
 
@@ -118,18 +135,11 @@ fn clean(builddir: &PathBuf) -> Result<()> {
     Ok(())
 }
 
-fn backend_from_choice(choice: BackendChoice) -> Box<dyn Backend> {
+fn backend_from_choice(choice: BackendChoice, manifest_dir: &Path) -> Box<dyn Backend> {
     match choice {
+        BackendChoice::Native => Box::new(CrustBackend::new(manifest_dir.to_path_buf())),
         BackendChoice::Ninja => Box::new(NinjaBackend),
         BackendChoice::Make => Box::new(MakeBackend),
-    }
-}
-
-fn expected_backend_output(backend: &dyn Backend, builddir: &PathBuf) -> PathBuf {
-    match backend.name() {
-        "ninja" => builddir.join("build.ninja"),
-        "make" => builddir.join("Makefile"),
-        _ => builddir.join("backend"),
     }
 }
 
@@ -142,6 +152,7 @@ impl BackendHint for BackendChoice {
         match self {
             BackendChoice::Ninja => "ninja",
             BackendChoice::Make => "make",
+            BackendChoice::Native => "native",
         }
     }
 }

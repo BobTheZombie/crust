@@ -58,17 +58,26 @@ an incremental dependency graph so backends can emit rules in topological order.
 
 ## Toolchain selection and detection
 
-The CLI lets you pick a backend with `--backend ninja` or `--backend make`.
-Crust does not auto-probe toolchains today; it assumes the selected backend binary
-(`ninja` or `make`) is available in your `PATH`. The configuration step checks whether
-previous backend outputs are older than the manifest or any listed sources and
-regenerates files when needed, so you can re-run `crust configure` safely.
+Crust defaults to a native backend that compiles and links targets directly using
+your platform C toolchain (`cc`/`ar`). No Ninja or Make files are produced in this
+mode, and `crust build`/`crust test` will execute the graph immediately.
+
+External backends remain available for compatibility and can be chosen with
+`--backend ninja` or `--backend make`. Crust does not auto-probe these toolchains;
+it assumes the selected backend binary is available in your `PATH`. The
+configuration step checks whether previous backend outputs are older than the
+manifest or any listed sources and regenerates files when needed, so you can re-run
+`crust configure` safely.
 
 ## Backend output
 
-Backends are responsible for translating the dependency graph into concrete build
-files under the chosen build directory (defaults to `build/`):
+Backends are responsible for turning the dependency graph into real artifacts or
+build files under the chosen build directory (defaults to `build/`):
 
+- **Native backend (default)** walks the graph, compiles sources with `cc`, links
+  executables/shared libraries, archives static libraries with `ar`, and executes
+  custom commands. Outputs are materialized directly in the build directory without
+  generating intermediary project files.
 - **Ninja backend** emits `build.ninja` with simple stamp rules for each target. It
   wires sources and dependent outputs into each rule and sets `builddir` and `srcdir`
   variables at the top of the file.
@@ -76,8 +85,9 @@ files under the chosen build directory (defaults to `build/`):
   provided custom command. It defines `SRCROOT` and `BUILDDIR` variables and writes one
   rule per target output.
 
-When `crust build` or `crust test` is invoked, the CLI prints a hint that shows which
-command to run (`ninja` or `make`) from inside the build directory.
+When `crust build` or `crust test` is invoked with an external backend, the CLI prints
+a hint that shows which command to run (`ninja` or `make`) from inside the build
+directory. With the native backend, the build happens immediately.
 
 ## Quickstart examples
 
