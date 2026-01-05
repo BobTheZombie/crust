@@ -2,6 +2,8 @@ use crate::backend::{Backend, BackendEmitResult};
 use crate::executor::BuildExecutor;
 use crate::graph::{DependencyGraph, TargetKind};
 use anyhow::{anyhow, Context, Result};
+use rayon::prelude::*;
+use rayon::ThreadPoolBuilder;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -63,37 +65,48 @@ impl CrustBackend {
         out_dir: &Path,
         target_name: &str,
     ) -> Result<Vec<PathBuf>> {
-        let mut objects = Vec::new();
-        for (idx, source) in sources.iter().enumerate() {
-            let source_path = self.manifest_dir.join(source);
-            let object_path = out_dir.join(format!("{target_name}_{idx}.o"));
-            if !self.needs_rebuild(&[source_path.clone()], &[object_path.clone()])? {
-                objects.push(object_path.clone());
-                continue;
-            }
+        let threads = self.parallelism.unwrap_or_else(|| num_cpus::get().max(1));
+        let manifest_dir = self.manifest_dir.clone();
+        let pool = ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .context("Failed to build compile thread pool")?;
 
-            if let Some(parent) = object_path.parent() {
-                fs::create_dir_all(parent)?;
-            }
+        pool.install(|| {
+            sources
+                .par_iter()
+                .enumerate()
+                .map(|(idx, source)| {
+                    let source_path = manifest_dir.join(source);
+                    let object_path = out_dir.join(format!("{target_name}_{idx}.o"));
 
-            println!(
-                "Compiling {} -> {}",
-                source_path.display(),
-                object_path.display()
-            );
-            let status = Command::new("cc")
-                .arg("-c")
-                .arg(&source_path)
-                .arg("-o")
-                .arg(&object_path)
-                .status()
-                .with_context(|| format!("Failed to spawn compiler for {}", source))?;
-            if !status.success() {
-                return Err(anyhow!("Compilation failed for {}", source));
-            }
-            objects.push(object_path);
-        }
-        Ok(objects)
+                    if !self.needs_rebuild(&[source_path.clone()], &[object_path.clone()])? {
+                        return Ok(object_path);
+                    }
+
+                    if let Some(parent) = object_path.parent() {
+                        fs::create_dir_all(parent)?;
+                    }
+
+                    println!(
+                        "Compiling {} -> {}",
+                        source_path.display(),
+                        object_path.display()
+                    );
+                    let status = Command::new("cc")
+                        .arg("-c")
+                        .arg(&source_path)
+                        .arg("-o")
+                        .arg(&object_path)
+                        .status()
+                        .with_context(|| format!("Failed to spawn compiler for {}", source))?;
+                    if !status.success() {
+                        return Err(anyhow!("Compilation failed for {}", source));
+                    }
+                    Ok(object_path)
+                })
+                .collect()
+        })
     }
 
     fn run_custom_command(
