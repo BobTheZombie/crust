@@ -2,7 +2,7 @@ use crate::backend::{Backend, BackendEmitResult};
 use crate::graph::{DependencyGraph, TargetKind};
 use anyhow::Result;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 pub struct NinjaBackend;
 
@@ -11,7 +11,12 @@ impl Backend for NinjaBackend {
         "ninja"
     }
 
-    fn emit(&self, graph: &DependencyGraph, out_dir: &Path) -> Result<BackendEmitResult> {
+    fn emit(
+        &self,
+        graph: &DependencyGraph,
+        out_dir: &Path,
+        _manifest_dir: &Path,
+    ) -> Result<BackendEmitResult> {
         fs::create_dir_all(out_dir)?;
         let mut lines = Vec::new();
         lines.push("rule stamp".to_string());
@@ -71,6 +76,10 @@ impl Backend for NinjaBackend {
         fs::write(&path, content)?;
         Ok(BackendEmitResult::single(path))
     }
+
+    fn primary_outputs(&self, _graph: &DependencyGraph, out_dir: &Path) -> Vec<PathBuf> {
+        vec![out_dir.join("build.ninja")]
+    }
 }
 
 #[cfg(test)]
@@ -95,7 +104,7 @@ mod tests {
         let graph = DependencyGraph::from_manifest(&manifest).unwrap();
         let dir = tempdir().unwrap();
         let backend = NinjaBackend;
-        let result = backend.emit(&graph, dir.path()).unwrap();
+        let result = backend.emit(&graph, dir.path(), dir.path()).unwrap();
         let content = std::fs::read_to_string(&result.files[0]).unwrap();
         assert!(content.contains("builddir ="));
         assert!(content.contains("build ${builddir}/app"));
