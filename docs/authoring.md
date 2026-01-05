@@ -89,6 +89,27 @@ When `crust build` or `crust test` is invoked with an external backend, the CLI 
 a hint that shows which command to run (`ninja` or `make`) from inside the build
 directory. With the native backend, the build happens immediately.
 
+## Native backend concurrency model
+
+The native backend executes the dependency graph directly with a worker pool. It
+enqueues targets once all of their declared dependencies have finished, so work that
+does not share prerequisites can run in parallel. The pool size defaults to the host
+CPU count and can be adjusted with `-j`/`--jobs`:
+
+```bash
+# Limit concurrency to four workers
+crust build --backend native -j 4
+
+# Saturate available cores during a test run
+crust test --backend native
+```
+
+Each worker receives the ready target, resolves its dependency outputs, and then runs
+the appropriate action (compile, link, archive, or custom command). Failures stop the
+queue and propagate the first encountered error. Outputs are always written into the
+selected build directory (`--builddir`), and the scheduler guarantees a target is only
+started after all of its prerequisites complete successfully.
+
 ## Quickstart examples
 
 You can try Crust with the bundled examples:

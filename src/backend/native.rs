@@ -1,19 +1,24 @@
 use crate::backend::{Backend, BackendEmitResult};
+use crate::executor::BuildExecutor;
 use crate::graph::{DependencyGraph, TargetKind};
 use anyhow::{anyhow, Context, Result};
-use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::SystemTime;
 
+#[derive(Clone)]
 pub struct CrustBackend {
     manifest_dir: PathBuf,
+    parallelism: Option<usize>,
 }
 
 impl CrustBackend {
-    pub fn new(manifest_dir: PathBuf) -> Self {
-        CrustBackend { manifest_dir }
+    pub fn new(manifest_dir: PathBuf, parallelism: Option<usize>) -> Self {
+        CrustBackend {
+            manifest_dir,
+            parallelism,
+        }
     }
 
     fn needs_rebuild(&self, inputs: &[PathBuf], outputs: &[PathBuf]) -> Result<bool> {
@@ -244,6 +249,45 @@ impl CrustBackend {
         inputs.extend_from_slice(dep_outputs);
         inputs
     }
+
+    fn execute_target(
+        &self,
+        node: &crate::graph::TargetNode,
+        dep_outputs: &[PathBuf],
+        out_dir: &Path,
+    ) -> Result<Vec<PathBuf>> {
+        let outputs: Vec<PathBuf> = node.outputs.iter().map(|o| out_dir.join(o)).collect();
+
+        match node.kind {
+            TargetKind::Executable => {
+                let output =
+                    self.link_executable(&node.name, &node.sources, dep_outputs, out_dir)?;
+                Ok(vec![output])
+            }
+            TargetKind::StaticLibrary => {
+                let output =
+                    self.archive_static_library(&node.name, &node.sources, dep_outputs, out_dir)?;
+                Ok(vec![output])
+            }
+            TargetKind::SharedLibrary => {
+                let output =
+                    self.link_shared_library(&node.name, &node.sources, dep_outputs, out_dir)?;
+                Ok(vec![output])
+            }
+            TargetKind::CustomCommand => {
+                let inputs = self.collect_inputs(&node.sources, dep_outputs);
+                self.run_custom_command(
+                    node.command
+                        .as_deref()
+                        .ok_or_else(|| anyhow!("Missing custom command for {}", node.name))?,
+                    &inputs,
+                    &outputs,
+                    out_dir,
+                )?;
+                Ok(outputs)
+            }
+        }
+    }
 }
 
 impl Backend for CrustBackend {
@@ -258,55 +302,19 @@ impl Backend for CrustBackend {
         _manifest_dir: &Path,
     ) -> Result<BackendEmitResult> {
         fs::create_dir_all(out_dir)?;
-        let mut produced: HashMap<String, Vec<PathBuf>> = HashMap::new();
-        let mut all_outputs = Vec::new();
+        let executor = BuildExecutor::new(self.parallelism);
+        let out_dir = out_dir.to_path_buf();
+        let backend = self.clone();
 
-        for node in graph.topo_order()? {
-            let dep_outputs: Vec<PathBuf> = node
-                .dependencies
-                .iter()
-                .flat_map(|d| produced.get(d).cloned().unwrap_or_default())
-                .collect();
-            let outputs: Vec<PathBuf> = node.outputs.iter().map(|o| out_dir.join(o)).collect();
+        let result = executor.execute(graph, move |node, dep_outputs| {
+            backend.execute_target(node, &dep_outputs, &out_dir)
+        })?;
 
-            match node.kind {
-                TargetKind::Executable => {
-                    let output =
-                        self.link_executable(&node.name, &node.sources, &dep_outputs, out_dir)?;
-                    produced.insert(node.name.clone(), vec![output.clone()]);
-                    all_outputs.push(output);
-                }
-                TargetKind::StaticLibrary => {
-                    let output = self.archive_static_library(
-                        &node.name,
-                        &node.sources,
-                        &dep_outputs,
-                        out_dir,
-                    )?;
-                    produced.insert(node.name.clone(), vec![output.clone()]);
-                    all_outputs.push(output);
-                }
-                TargetKind::SharedLibrary => {
-                    let output =
-                        self.link_shared_library(&node.name, &node.sources, &dep_outputs, out_dir)?;
-                    produced.insert(node.name.clone(), vec![output.clone()]);
-                    all_outputs.push(output);
-                }
-                TargetKind::CustomCommand => {
-                    let inputs = self.collect_inputs(&node.sources, &dep_outputs);
-                    self.run_custom_command(
-                        node.command
-                            .as_deref()
-                            .ok_or_else(|| anyhow!("Missing custom command for {}", node.name))?,
-                        &inputs,
-                        &outputs,
-                        out_dir,
-                    )?;
-                    produced.insert(node.name.clone(), outputs.clone());
-                    all_outputs.extend(outputs.clone());
-                }
-            }
-        }
+        let all_outputs: Vec<PathBuf> = result
+            .produced
+            .values()
+            .flat_map(|outputs| outputs.iter().cloned())
+            .collect();
 
         Ok(BackendEmitResult { files: all_outputs })
     }
@@ -346,7 +354,7 @@ sources = ["main.c"]
         let manifest = ProjectManifest::load(&manifest_path).unwrap();
         let graph = DependencyGraph::from_manifest(&manifest).unwrap();
         let builddir = dir.path().join("build");
-        let backend = CrustBackend::new(dir.path().to_path_buf());
+        let backend = CrustBackend::new(dir.path().to_path_buf(), None);
 
         let result = backend.emit(&graph, &builddir, dir.path()).unwrap();
         let output = &result.files[0];

@@ -9,6 +9,9 @@ crust test        # Run the project tests (native backend by default)
 crust clean       # Clean generated build outputs
 ```
 
+The native backend runs builds in parallel by default, sizing its worker pool to your
+CPU count. Use `-j`/`--jobs` to cap concurrency (for example, `crust build -j 4`).
+
 ## Sample project
 
 You can try Crust immediately with the bundled getting-started example:
