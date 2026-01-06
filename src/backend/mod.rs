@@ -1,6 +1,7 @@
 use crate::graph::DependencyGraph;
 use anyhow::Result;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 pub mod make;
 pub mod native;
@@ -25,10 +26,22 @@ pub trait Backend {
 #[derive(Debug, Clone)]
 pub struct BackendEmitResult {
     pub files: Vec<PathBuf>,
+    pub target_summaries: Vec<TargetBuildSummary>,
 }
 
 impl BackendEmitResult {
     pub fn single(path: PathBuf) -> Self {
-        BackendEmitResult { files: vec![path] }
+        BackendEmitResult {
+            files: vec![path],
+            target_summaries: Vec::new(),
+        }
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct TargetBuildSummary {
+    pub name: String,
+    pub built: bool,
+    pub outputs: Vec<PathBuf>,
+    pub duration: Duration,
 }

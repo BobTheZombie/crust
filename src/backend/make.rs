@@ -1,8 +1,9 @@
-use crate::backend::{Backend, BackendEmitResult};
+use crate::backend::{Backend, BackendEmitResult, TargetBuildSummary};
 use crate::graph::{DependencyGraph, TargetKind};
 use anyhow::Result;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 pub struct MakeBackend;
 
@@ -70,7 +71,22 @@ impl Backend for MakeBackend {
 
         let path = out_dir.join("Makefile");
         fs::write(&path, content)?;
-        Ok(BackendEmitResult::single(path))
+
+        let target_summaries = graph
+            .topo_order()?
+            .into_iter()
+            .map(|node| TargetBuildSummary {
+                name: node.name.clone(),
+                built: false,
+                outputs: node.outputs.iter().map(|o| out_dir.join(o)).collect(),
+                duration: Duration::default(),
+            })
+            .collect();
+
+        Ok(BackendEmitResult {
+            files: vec![path],
+            target_summaries,
+        })
     }
 
     fn primary_outputs(&self, _graph: &DependencyGraph, out_dir: &Path) -> Vec<PathBuf> {

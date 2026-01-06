@@ -3,14 +3,40 @@ use anyhow::{anyhow, Result};
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::Duration;
 
 pub struct ExecutionResult {
-    pub produced: HashMap<String, Vec<std::path::PathBuf>>,
+    pub produced: HashMap<String, TargetRunResult>,
 }
 
 #[derive(Debug, Clone, Copy)]
 pub struct BuildExecutor {
     workers: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct TargetRunResult {
+    pub outputs: Vec<std::path::PathBuf>,
+    pub built: bool,
+    pub duration: Duration,
+}
+
+impl TargetRunResult {
+    pub fn built(outputs: Vec<std::path::PathBuf>, duration: Duration) -> Self {
+        TargetRunResult {
+            outputs,
+            built: true,
+            duration,
+        }
+    }
+
+    pub fn skipped(outputs: Vec<std::path::PathBuf>, duration: Duration) -> Self {
+        TargetRunResult {
+            outputs,
+            built: false,
+            duration,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -19,6 +45,7 @@ mod tests {
     use crate::config::{ProjectInfo, ProjectManifest, Target};
     use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
+    use std::time::Duration;
 
     #[test]
     fn schedules_dependencies_before_dependents() {
@@ -63,7 +90,10 @@ mod tests {
                     assert!(done.contains(dep), "dependency {} not complete", dep);
                 }
                 done.push(node.name.clone());
-                Ok(node.outputs.iter().map(|o| PathBuf::from(o)).collect())
+                Ok(TargetRunResult::built(
+                    node.outputs.iter().map(|o| PathBuf::from(o)).collect(),
+                    Duration::from_secs(0),
+                ))
             })
             .unwrap();
 
@@ -79,7 +109,7 @@ impl BuildExecutor {
 
     pub fn execute<F>(&self, graph: &DependencyGraph, run_node: F) -> Result<ExecutionResult>
     where
-        F: Fn(&TargetNode, Vec<std::path::PathBuf>) -> Result<Vec<std::path::PathBuf>>
+        F: Fn(&TargetNode, Vec<std::path::PathBuf>) -> Result<TargetRunResult>
             + Send
             + Sync
             + 'static,
@@ -110,7 +140,7 @@ impl BuildExecutor {
             })
             .collect();
 
-        let produced: Arc<Mutex<HashMap<String, Vec<std::path::PathBuf>>>> =
+        let produced: Arc<Mutex<HashMap<String, TargetRunResult>>> =
             Arc::new(Mutex::new(HashMap::new()));
         let nodes = Arc::new(nodes);
         let (task_tx, task_rx) = crossbeam_channel::unbounded::<String>();
@@ -137,7 +167,7 @@ impl BuildExecutor {
                         let map = produced.lock().expect("produced mutex poisoned");
                         node.dependencies
                             .iter()
-                            .flat_map(|d| map.get(d).cloned().unwrap_or_default())
+                            .flat_map(|d| map.get(d).map(|r| r.outputs.clone()).unwrap_or_default())
                             .collect()
                     };
                     let result = run_node(node, dep_outputs);

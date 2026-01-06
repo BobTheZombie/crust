@@ -4,11 +4,15 @@ mod executor;
 mod graph;
 
 use anyhow::{Context, Result};
-use backend::{make::MakeBackend, native::CrustBackend, ninja::NinjaBackend, Backend};
+use backend::{
+    make::MakeBackend, native::CrustBackend, ninja::NinjaBackend, Backend, BackendEmitResult,
+    TargetBuildSummary,
+};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use config::ProjectManifest;
 use graph::DependencyGraph;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 #[derive(Parser)]
 #[command(
@@ -93,25 +97,19 @@ fn drive(opts: &CommandOptions, show_hint: bool) -> Result<()> {
             opts.builddir.display()
         );
     } else {
-        let result = backend.emit(&graph, &opts.builddir, &manifest_dir)?;
-        if backend.name() == "native" {
-            println!(
-                "Built {} output(s) in {}",
-                result.files.len(),
-                opts.builddir.display()
-            );
-        } else {
-            println!(
-                "Generated {} backend files: {}",
-                backend.name(),
-                result
-                    .files
-                    .iter()
-                    .map(|p| p.display().to_string())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            );
+        let emit_start = Instant::now();
+        let mut result = backend.emit(&graph, &opts.builddir, &manifest_dir)?;
+        let total_elapsed = emit_start.elapsed();
+
+        if result.target_summaries.is_empty() {
+            result.target_summaries = graph
+                .topo_order()?
+                .into_iter()
+                .map(|node| backend_summary_from_graph(node, &opts.builddir))
+                .collect();
         }
+
+        print_summary(backend.as_ref(), &result, total_elapsed);
     }
 
     if show_hint {
@@ -130,6 +128,56 @@ fn drive(opts: &CommandOptions, show_hint: bool) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn backend_summary_from_graph(node: &graph::TargetNode, builddir: &Path) -> TargetBuildSummary {
+    TargetBuildSummary {
+        name: node.name.clone(),
+        built: false,
+        outputs: node.outputs.iter().map(|o| builddir.join(o)).collect(),
+        duration: Duration::default(),
+    }
+}
+
+fn print_summary(backend: &dyn Backend, result: &BackendEmitResult, total_elapsed: Duration) {
+    let built_count = result.target_summaries.iter().filter(|t| t.built).count();
+    let skipped_count = result.target_summaries.len().saturating_sub(built_count);
+
+    println!("\nBuild summary");
+    println!("  Backend: {}", backend.name());
+    println!(
+        "  Targets: {} built, {} skipped, {} total",
+        built_count,
+        skipped_count,
+        result.target_summaries.len()
+    );
+    println!("  Elapsed time: {}", format_duration(total_elapsed));
+
+    if !result.files.is_empty() {
+        println!("  Backend outputs:");
+        for file in &result.files {
+            println!("    - {}", file.display());
+        }
+    }
+
+    if !result.target_summaries.is_empty() {
+        println!("  Target results:");
+        for target in &result.target_summaries {
+            let status = if target.built { "built" } else { "skipped" };
+            println!(
+                "    - {} ({status}, {})",
+                target.name,
+                format_duration(target.duration)
+            );
+            for output in &target.outputs {
+                println!("      -> {}", output.display());
+            }
+        }
+    }
+}
+
+fn format_duration(duration: Duration) -> String {
+    format!("{:.2}s", duration.as_secs_f64())
 }
 
 fn clean(builddir: &PathBuf) -> Result<()> {
