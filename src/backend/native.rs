@@ -1,5 +1,5 @@
-use crate::backend::{Backend, BackendEmitResult};
-use crate::executor::BuildExecutor;
+use crate::backend::{Backend, BackendEmitResult, TargetBuildSummary};
+use crate::executor::{BuildExecutor, TargetRunResult};
 use crate::graph::{DependencyGraph, TargetKind};
 use anyhow::{anyhow, Context, Result};
 use rayon::prelude::*;
@@ -7,7 +7,7 @@ use rayon::ThreadPoolBuilder;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::SystemTime;
+use std::time::{Instant, SystemTime};
 
 #[derive(Clone)]
 pub struct CrustBackend {
@@ -115,15 +115,16 @@ impl CrustBackend {
         inputs: &[PathBuf],
         outputs: &[PathBuf],
         out_dir: &Path,
-    ) -> Result<()> {
+    ) -> Result<TargetRunResult> {
+        let start = Instant::now();
+        if !self.needs_rebuild(inputs, outputs)? {
+            return Ok(TargetRunResult::skipped(outputs.to_vec(), start.elapsed()));
+        }
+
         for output in outputs {
             if let Some(parent) = output.parent() {
                 fs::create_dir_all(parent)?;
             }
-        }
-
-        if !self.needs_rebuild(inputs, outputs)? {
-            return Ok(());
         }
 
         println!("Running custom command: {}", command);
@@ -160,7 +161,7 @@ impl CrustBackend {
             }
         }
 
-        Ok(())
+        Ok(TargetRunResult::built(outputs.to_vec(), start.elapsed()))
     }
 
     fn link_executable(
@@ -169,10 +170,11 @@ impl CrustBackend {
         sources: &[String],
         dep_outputs: &[PathBuf],
         out_dir: &Path,
-    ) -> Result<PathBuf> {
+    ) -> Result<TargetRunResult> {
         let outputs = vec![out_dir.join(name)];
+        let start = Instant::now();
         if !self.needs_rebuild(&self.collect_inputs(sources, dep_outputs), &outputs)? {
-            return Ok(outputs[0].clone());
+            return Ok(TargetRunResult::skipped(outputs, start.elapsed()));
         }
 
         let objects = self.compile_objects(sources, out_dir, name)?;
@@ -191,7 +193,7 @@ impl CrustBackend {
             return Err(anyhow!("Linking failed for executable {}", name));
         }
 
-        Ok(outputs[0].clone())
+        Ok(TargetRunResult::built(outputs, start.elapsed()))
     }
 
     fn link_shared_library(
@@ -200,18 +202,19 @@ impl CrustBackend {
         sources: &[String],
         dep_outputs: &[PathBuf],
         out_dir: &Path,
-    ) -> Result<PathBuf> {
-        let output = out_dir.join(format!("lib{name}.so"));
+    ) -> Result<TargetRunResult> {
+        let outputs = vec![out_dir.join(format!("lib{name}.so"))];
+        let start = Instant::now();
         if !self.needs_rebuild(
             &self.collect_inputs(sources, dep_outputs),
-            &[output.clone()],
+            &[outputs[0].clone()],
         )? {
-            return Ok(output);
+            return Ok(TargetRunResult::skipped(outputs, start.elapsed()));
         }
 
         let objects = self.compile_objects(sources, out_dir, name)?;
         let mut cmd = Command::new("cc");
-        cmd.arg("-shared").arg("-o").arg(&output);
+        cmd.arg("-shared").arg("-o").arg(&outputs[0]);
         for obj in &objects {
             cmd.arg(obj);
         }
@@ -219,13 +222,13 @@ impl CrustBackend {
             cmd.arg(dep);
         }
 
-        println!("Linking shared library {}", output.display());
+        println!("Linking shared library {}", outputs[0].display());
         let status = cmd.status().context("Failed to spawn shared linker")?;
         if !status.success() {
             return Err(anyhow!("Linking failed for shared library {}", name));
         }
 
-        Ok(output)
+        Ok(TargetRunResult::built(outputs, start.elapsed()))
     }
 
     fn archive_static_library(
@@ -234,27 +237,28 @@ impl CrustBackend {
         sources: &[String],
         dep_outputs: &[PathBuf],
         out_dir: &Path,
-    ) -> Result<PathBuf> {
-        let output = out_dir.join(format!("lib{name}.a"));
+    ) -> Result<TargetRunResult> {
+        let outputs = vec![out_dir.join(format!("lib{name}.a"))];
         let inputs = self.collect_inputs(sources, dep_outputs);
-        if !self.needs_rebuild(&inputs, &[output.clone()])? {
-            return Ok(output);
+        let start = Instant::now();
+        if !self.needs_rebuild(&inputs, &[outputs[0].clone()])? {
+            return Ok(TargetRunResult::skipped(outputs, start.elapsed()));
         }
 
         let objects = self.compile_objects(sources, out_dir, name)?;
         let mut cmd = Command::new("ar");
-        cmd.arg("rcs").arg(&output);
+        cmd.arg("rcs").arg(&outputs[0]);
         for obj in &objects {
             cmd.arg(obj);
         }
 
-        println!("Archiving static library {}", output.display());
+        println!("Archiving static library {}", outputs[0].display());
         let status = cmd.status().context("Failed to spawn archiver")?;
         if !status.success() {
             return Err(anyhow!("Archiving failed for static library {}", name));
         }
 
-        Ok(output)
+        Ok(TargetRunResult::built(outputs, start.elapsed()))
     }
 
     fn collect_inputs(&self, sources: &[String], dep_outputs: &[PathBuf]) -> Vec<PathBuf> {
@@ -268,24 +272,18 @@ impl CrustBackend {
         node: &crate::graph::TargetNode,
         dep_outputs: &[PathBuf],
         out_dir: &Path,
-    ) -> Result<Vec<PathBuf>> {
+    ) -> Result<TargetRunResult> {
         let outputs: Vec<PathBuf> = node.outputs.iter().map(|o| out_dir.join(o)).collect();
 
         match node.kind {
             TargetKind::Executable => {
-                let output =
-                    self.link_executable(&node.name, &node.sources, dep_outputs, out_dir)?;
-                Ok(vec![output])
+                self.link_executable(&node.name, &node.sources, dep_outputs, out_dir)
             }
             TargetKind::StaticLibrary => {
-                let output =
-                    self.archive_static_library(&node.name, &node.sources, dep_outputs, out_dir)?;
-                Ok(vec![output])
+                self.archive_static_library(&node.name, &node.sources, dep_outputs, out_dir)
             }
             TargetKind::SharedLibrary => {
-                let output =
-                    self.link_shared_library(&node.name, &node.sources, dep_outputs, out_dir)?;
-                Ok(vec![output])
+                self.link_shared_library(&node.name, &node.sources, dep_outputs, out_dir)
             }
             TargetKind::CustomCommand => {
                 let inputs = self.collect_inputs(&node.sources, dep_outputs);
@@ -296,8 +294,7 @@ impl CrustBackend {
                     &inputs,
                     &outputs,
                     out_dir,
-                )?;
-                Ok(outputs)
+                )
             }
         }
     }
@@ -326,10 +323,29 @@ impl Backend for CrustBackend {
         let all_outputs: Vec<PathBuf> = result
             .produced
             .values()
-            .flat_map(|outputs| outputs.iter().cloned())
+            .flat_map(|outputs| outputs.outputs.iter().cloned())
             .collect();
 
-        Ok(BackendEmitResult { files: all_outputs })
+        let target_summaries = graph
+            .topo_order()?
+            .into_iter()
+            .filter_map(|node| {
+                result
+                    .produced
+                    .get(&node.name)
+                    .map(|entry| TargetBuildSummary {
+                        name: node.name.clone(),
+                        built: entry.built,
+                        outputs: entry.outputs.clone(),
+                        duration: entry.duration,
+                    })
+            })
+            .collect();
+
+        Ok(BackendEmitResult {
+            files: all_outputs,
+            target_summaries,
+        })
     }
 
     fn primary_outputs(&self, graph: &DependencyGraph, out_dir: &Path) -> Vec<PathBuf> {
